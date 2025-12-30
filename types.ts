@@ -9,9 +9,13 @@ export interface DateIdea {
   location?: string;
   duration?: string;
   cost?: CostLevel;
-  createdBy?: string; // Name/Email of the user
+  createdBy?: string; 
   completed: boolean;
   createdAt: number;
+  // New Fields
+  type: string; // e.g., "Aktivitäten", "Gerichte", "Ideen"
+  order: number; // For manual sorting
+  plannedMonth?: string; // Format "YYYY-MM"
 }
 
 export interface AIPromptRequest {
