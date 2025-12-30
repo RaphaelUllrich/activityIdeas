@@ -7,7 +7,7 @@ import { de } from 'date-fns/locale';
 
 import { DateIdea, CostLevel } from './types';
 import { generateDateIdeas } from './services/geminiService';
-import { appwriteService } from './services/appwrite';
+import { appwriteService, CollectionMeta } from './services/appwrite';
 import LoginScreen from './components/LoginScreen';
 
 // Constants
@@ -28,10 +28,9 @@ const App: React.FC = () => {
   // View State
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [viewMode, setViewMode] = useState<'list' | 'planner'>('list');
-  const [collections, setCollections] = useState<string[]>(() => {
-      const saved = localStorage.getItem('datejar_collections');
-      return saved ? JSON.parse(saved) : DEFAULT_COLLECTIONS;
-  });
+  
+  // COLLECTION STATE (New: Object Array from DB)
+  const [collections, setCollections] = useState<CollectionMeta[]>([]);
   const [activeCollection, setActiveCollection] = useState<string>('Aktivitäten');
   
   // UI Helpers
@@ -64,7 +63,7 @@ const App: React.FC = () => {
   const [costFilter, setCostFilter] = useState<CostLevel | 'all'>('all');
   const [durationFilter, setDurationFilter] = useState<string | 'all'>('all');
 
-  // Persistence helpers
+  // Persistence helpers (Fallback only)
   const saveLocal = (items: DateIdea[]) => localStorage.setItem('datejar_ideas', JSON.stringify(items));
   const getLocal = (): DateIdea[] => {
     const s = localStorage.getItem('datejar_ideas');
@@ -73,26 +72,44 @@ const App: React.FC = () => {
 
   // Auth & Initial Load
   useEffect(() => {
-    const checkAuth = async () => {
+    const init = async () => {
       try {
         const currentUser = await appwriteService.getUser();
         setUser(currentUser);
-      } catch (e) { console.error(e); } finally { setIsAuthLoading(false); }
+        if (currentUser) {
+            await loadData();
+        } else {
+            setIsAuthLoading(false);
+        }
+      } catch (e) { console.error(e); setIsAuthLoading(false); }
     };
-    checkAuth();
+    init();
   }, []);
 
-  useEffect(() => {
-    if (user) loadIdeas();
-  }, [user]);
-
-  useEffect(() => {
-      localStorage.setItem('datejar_collections', JSON.stringify(collections));
-  }, [collections]);
-
-  const loadIdeas = async () => {
+  const loadData = async () => {
     setLoading(true);
     try {
+      // 1. Load Collections
+      let cols = await appwriteService.listCollections();
+      
+      // If empty (first run), create defaults
+      if (cols.length === 0) {
+          for (const name of DEFAULT_COLLECTIONS) {
+              await appwriteService.createCollection(name);
+          }
+          cols = await appwriteService.listCollections();
+      }
+      setCollections(cols);
+
+      // Set active
+      if (cols.length > 0) {
+           // If current active not in list, fallback to first
+           if (!cols.find(c => c.name === activeCollection)) {
+               setActiveCollection(cols[0].name);
+           }
+      }
+
+      // 2. Load Ideas
       const fetchedIdeas = await appwriteService.listIdeas();
       setIdeas(fetchedIdeas);
       setOfflineMode(false);
@@ -100,8 +117,11 @@ const App: React.FC = () => {
       console.warn("Offline", error);
       setOfflineMode(true);
       setIdeas(getLocal());
+      // Fallback collections for offline
+      setCollections(DEFAULT_COLLECTIONS.map((n, i) => ({ $id: `local-${i}`, name: n })));
     } finally {
       setLoading(false);
+      setIsAuthLoading(false);
     }
   };
 
@@ -111,16 +131,53 @@ const App: React.FC = () => {
       await appwriteService.logout();
       setUser(null);
       setIdeas([]);
+      window.location.reload(); // Hard reload to clear states
   };
 
-  const handleAddCollection = () => {
+  // --- Collection Management ---
+  const handleAddCollection = async () => {
       const name = prompt("Name der neuen Sammlung (z.B. 'Filme'):");
-      if (name && !collections.includes(name)) {
-          setCollections([...collections, name]);
-          setActiveCollection(name);
+      if (!name) return;
+      
+      try {
+          const newCol = await appwriteService.createCollection(name);
+          setCollections([...collections, newCol]);
+          setActiveCollection(newCol.name);
           setSidebarOpen(false);
-      }
+      } catch (e) { alert("Fehler beim Erstellen der Sammlung"); }
   };
+
+  const handleDeleteCollection = async (id: string, name: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (!window.confirm(`Warnung: Sammlung "${name}" und ALLE Einträge darin werden gelöscht!`)) return;
+
+      try {
+          await appwriteService.deleteCollection(id, name);
+          const newCols = collections.filter(c => c.$id !== id);
+          setCollections(newCols);
+          // Cleanup ideas in frontend
+          setIdeas(prev => prev.filter(i => i.type !== name));
+          
+          if (activeCollection === name && newCols.length > 0) {
+              setActiveCollection(newCols[0].name);
+          }
+      } catch (e) { alert("Löschen fehlgeschlagen"); }
+  };
+
+  const handleRenameCollection = async (id: string, oldName: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      const newName = prompt("Neuer Name:", oldName);
+      if (!newName || newName === oldName) return;
+
+      try {
+          await appwriteService.renameCollection(id, oldName, newName);
+          setCollections(prev => prev.map(c => c.$id === id ? { ...c, name: newName } : c));
+          setIdeas(prev => prev.map(i => i.type === oldName ? { ...i, type: newName } : i));
+          if (activeCollection === oldName) setActiveCollection(newName);
+      } catch (e) { alert("Umbenennen fehlgeschlagen"); }
+  };
+
+  // --- Modal / Idea Management ---
 
   const openModal = (item?: DateIdea) => {
       if (item) {
@@ -244,7 +301,6 @@ const App: React.FC = () => {
 
   // --- Shuffle Logic ---
   const handleShuffle = () => {
-    // 1. Get pool: Only active items from current collection
     const pool = currentCollectionIdeas.filter(i => !i.completed);
     
     if (pool.length === 0) {
@@ -252,12 +308,10 @@ const App: React.FC = () => {
         return;
     }
 
-    // 2. Pick random
     const randomItem = pool[Math.floor(Math.random() * pool.length)];
     setPickedIdea(randomItem);
     setShowShuffleModal(true);
 
-    // 3. Effects
     confetti({
         particleCount: 150,
         spread: 100,
@@ -270,17 +324,13 @@ const App: React.FC = () => {
 
   const onDragEnd = async (result: DropResult) => {
       if (!result.destination) return;
-      
       const sourceIndex = result.source.index;
       const destIndex = result.destination.index;
-      
       if (sourceIndex === destIndex) return;
 
       const reorderedList: DateIdea[] = Array.from(filteredIdeas);
       const [movedItem] = reorderedList.splice(sourceIndex, 1);
-      
       if (!movedItem) return;
-
       reorderedList.splice(destIndex, 0, movedItem);
 
       const updatedIdeas = ideas.map(idea => {
@@ -341,7 +391,6 @@ const App: React.FC = () => {
     return Array.from(cats).sort();
   }, [currentCollectionIdeas]);
 
-  // Extract unique durations for filter
   const availableDurations = useMemo(() => {
     const durs = new Set<string>();
     currentCollectionIdeas.forEach(i => { if(i.duration) durs.add(i.duration) });
@@ -387,14 +436,25 @@ const App: React.FC = () => {
             
             <nav className="flex-1 space-y-2 overflow-y-auto">
                 {collections.map(col => (
-                    <button 
-                        key={col} 
-                        onClick={() => { setActiveCollection(col); setSidebarOpen(false); }}
-                        className={`w-full text-left px-4 py-3 rounded-xl font-medium transition-colors flex items-center justify-between ${activeCollection === col ? 'bg-rose-100 text-rose-700' : 'text-gray-600 hover:bg-gray-50'}`}
+                    <div 
+                        key={col.$id} 
+                        className={`w-full group px-4 py-3 rounded-xl font-medium transition-colors flex items-center justify-between cursor-pointer ${activeCollection === col.name ? 'bg-rose-100 text-rose-700' : 'text-gray-600 hover:bg-gray-50'}`}
+                        onClick={() => { setActiveCollection(col.name); setSidebarOpen(false); }}
                     >
-                        <span>{col}</span>
-                        {activeCollection === col && <Check className="w-4 h-4" />}
-                    </button>
+                        <span>{col.name}</span>
+                        
+                        <div className="flex items-center gap-1">
+                            {activeCollection === col.name && <Check className="w-4 h-4 mr-2" />}
+                            <button onClick={(e) => handleRenameCollection(col.$id, col.name, e)} className="p-1 text-gray-400 hover:text-blue-500 hover:bg-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
+                                <Pencil className="w-3 h-3" />
+                            </button>
+                            {collections.length > 1 && (
+                                <button onClick={(e) => handleDeleteCollection(col.$id, col.name, e)} className="p-1 text-gray-400 hover:text-red-500 hover:bg-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
+                                    <Trash2 className="w-3 h-3" />
+                                </button>
+                            )}
+                        </div>
+                    </div>
                 ))}
             </nav>
 
@@ -443,7 +503,6 @@ const App: React.FC = () => {
                 {/* Filter Bar */}
                 {viewMode === 'list' && (
                     <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
-                        {/* Status Filter */}
                         <div className="flex p-1 bg-gray-100 rounded-lg shrink-0">
                             {(['active', 'completed', 'all'] as const).map(s => (
                                 <button key={s} onClick={() => setStatusFilter(s)} className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${statusFilter === s ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
@@ -451,11 +510,8 @@ const App: React.FC = () => {
                                 </button>
                             ))}
                         </div>
-                        
-                        {/* Divider */}
                         <div className="w-px bg-gray-200 my-1 shrink-0"></div>
 
-                        {/* Category Filter */}
                         <select 
                             value={categoryFilter} 
                             onChange={(e) => setCategoryFilter(e.target.value)}
@@ -465,7 +521,6 @@ const App: React.FC = () => {
                             {availableCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
                         </select>
 
-                        {/* Cost Filter */}
                         <select 
                             value={costFilter} 
                             onChange={(e) => setCostFilter(e.target.value as any)}
@@ -475,7 +530,6 @@ const App: React.FC = () => {
                             {COST_LEVELS.map(c => <option key={c} value={c}>{c}</option>)}
                         </select>
 
-                        {/* Duration Filter */}
                         {availableDurations.length > 0 && (
                             <select 
                                 value={durationFilter} 
@@ -694,9 +748,8 @@ const App: React.FC = () => {
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm p-6 animate-in fade-in" onClick={() => setShowShuffleModal(false)}>
             <div 
                 className="bg-white w-full max-w-sm rounded-3xl p-8 shadow-2xl text-center relative overflow-hidden animate-in zoom-in-95 duration-300"
-                onClick={(e) => e.stopPropagation()} // Damit Klick ins Modal es nicht schließt
+                onClick={(e) => e.stopPropagation()}
             >
-                {/* NEU: Close Button oben rechts */}
                 <button 
                     onClick={() => setShowShuffleModal(false)} 
                     className="absolute top-3 right-3 p-2 bg-white/60 hover:bg-white rounded-full text-gray-400 hover:text-gray-600 transition-colors z-20"
@@ -704,7 +757,6 @@ const App: React.FC = () => {
                     <X className="w-5 h-5" />
                 </button>
 
-                {/* Background Decor */}
                 <div className="absolute top-0 left-0 w-full h-24 bg-gradient-to-b from-indigo-100 to-white -z-10"></div>
                 
                 <div className="mx-auto w-20 h-20 bg-indigo-100 rounded-full flex items-center justify-center mb-6 shadow-inner mt-2">
