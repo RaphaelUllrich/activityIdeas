@@ -3,10 +3,12 @@ import { Client, Databases, Permission, Role } from 'node-appwrite';
 // Configuration
 const ENDPOINT = 'https://cloud.appwrite.io/v1'; 
 const PROJECT_ID = '69505859000f4ab4347d';
+// ACHTUNG: Das ist dein API Key. Wenn du das Projekt veröffentlichst (GitHub), nimm diesen Key raus!
 const API_KEY = 'standard_2cfbd2f45b0198e7b0ee5367e0bd8b72719d228fed58e0a403f53e5ff6be54dd34282a42b260b91d87eebcb35f8ec77338e119ad900453e916b5ee0ab8743c483d40eaf5363774caa14e5a47dd94ef4b7ae0191c69268a30f4ab6e9250e0bc673baa5ac0bafe81c4ed3c967dfeed8fd2d55f52d0e3c0c696908e4e0439eb35dd';
 
 const DB_ID = 'datejar_db';
 const COLL_ID = 'ideas';
+const META_COLL_ID = 'collections_meta'; // NEU: Für Sammlungs-Namen
 
 const client = new Client()
     .setEndpoint(ENDPOINT)
@@ -30,8 +32,6 @@ async function waitForAttribute(dbId, collId, key) {
         await new Promise(r => setTimeout(r, 1000));
         retries++;
     }
-    // Don't throw here to allow script to continue if one attribute is stuck, 
-    // but in prod you might want to throw.
     console.warn(`Warning: Attribute ${key} did not become available in time.`);
 }
 
@@ -50,7 +50,7 @@ async function init() {
         } else throw e;
     }
 
-    // 2. Check/Create Collection & Permissions
+    // 2. Permissions (Public Read/Write for simplicity in this demo)
     const permissions = [
         Permission.read(Role.any()),
         Permission.write(Role.any()),
@@ -58,59 +58,70 @@ async function init() {
         Permission.delete(Role.any()),
     ];
 
+    // 3. Collection: IDEAS
     try {
         await databases.getCollection(DB_ID, COLL_ID);
-        console.log('✅ Collection exists. Updating permissions...');
+        console.log('✅ Ideas Collection exists. Updating permissions...');
         await databases.updateCollection(DB_ID, COLL_ID, 'Date Ideas', permissions);
     } catch (e) {
         if (e.code === 404) {
-            console.log('Creating collection...');
+            console.log('Creating Ideas collection...');
             await databases.createCollection(DB_ID, COLL_ID, 'Date Ideas', permissions);
-            console.log('✅ Collection created');
+            console.log('✅ Ideas Collection created');
         } else throw e;
     }
 
-    // 3. Create Attributes helper
-    const ensureAttribute = async (key, createPromise) => {
+    // 4. Collection: META (Sammlungen)
+    try {
+        await databases.getCollection(DB_ID, META_COLL_ID);
+        console.log('✅ Meta Collection exists.');
+    } catch (e) {
+        if (e.code === 404) {
+            console.log('Creating Meta collection...');
+            await databases.createCollection(DB_ID, META_COLL_ID, 'Collection Names', permissions);
+            console.log('✅ Meta Collection created');
+        } else throw e;
+    }
+
+    // 5. Create Attributes helper
+    const ensureAttribute = async (collId, key, createPromise) => {
         try {
-            const attrs = await databases.listAttributes(DB_ID, COLL_ID);
+            const attrs = await databases.listAttributes(DB_ID, collId);
             const exists = attrs.attributes.find(a => a.key === key);
             if (!exists) {
-                console.log(`Creating attribute: ${key}...`);
+                console.log(`Creating attribute in ${collId}: ${key}...`);
                 await createPromise();
             } else {
-                console.log(`✅ Attribute '${key}' exists`);
+                console.log(`✅ Attribute '${key}' in ${collId} exists`);
             }
-            await waitForAttribute(DB_ID, COLL_ID, key);
+            await waitForAttribute(DB_ID, collId, key);
         } catch (e) {
             console.error(`Error handling attribute ${key}:`, e);
         }
     };
 
-    // --- Core Fields ---
-    await ensureAttribute('title', () => databases.createStringAttribute(DB_ID, COLL_ID, 'title', 255, true));
-    await ensureAttribute('completed', () => databases.createBooleanAttribute(DB_ID, COLL_ID, 'completed', true));
-    await ensureAttribute('createdAt', () => databases.createIntegerAttribute(DB_ID, COLL_ID, 'createdAt', true));
+    // --- Attributes for IDEAS ---
+    console.log("--- Setting up Idea Attributes ---");
+    await ensureAttribute(COLL_ID, 'title', () => databases.createStringAttribute(DB_ID, COLL_ID, 'title', 255, true));
+    await ensureAttribute(COLL_ID, 'completed', () => databases.createBooleanAttribute(DB_ID, COLL_ID, 'completed', true));
+    await ensureAttribute(COLL_ID, 'createdAt', () => databases.createIntegerAttribute(DB_ID, COLL_ID, 'createdAt', true));
+    
+    // Metadata
+    await ensureAttribute(COLL_ID, 'category', () => databases.createStringAttribute(DB_ID, COLL_ID, 'category', 50, false, 'Sonstiges'));
+    await ensureAttribute(COLL_ID, 'description', () => databases.createStringAttribute(DB_ID, COLL_ID, 'description', 2000, false));
+    await ensureAttribute(COLL_ID, 'location', () => databases.createStringAttribute(DB_ID, COLL_ID, 'location', 255, false));
+    await ensureAttribute(COLL_ID, 'cost', () => databases.createStringAttribute(DB_ID, COLL_ID, 'cost', 20, false));
+    await ensureAttribute(COLL_ID, 'duration', () => databases.createStringAttribute(DB_ID, COLL_ID, 'duration', 100, false));
+    await ensureAttribute(COLL_ID, 'createdBy', () => databases.createStringAttribute(DB_ID, COLL_ID, 'createdBy', 255, false));
 
-    // --- New Fields (Metadata) ---
-    // Category: e.g. 'Active', 'Food', etc.
-    await ensureAttribute('category', () => databases.createStringAttribute(DB_ID, COLL_ID, 'category', 50, false, 'Sonstiges'));
-    
-    // Description: Longer text for details
-    await ensureAttribute('description', () => databases.createStringAttribute(DB_ID, COLL_ID, 'description', 2000, false));
-    
-    // Location: Where does it happen?
-    await ensureAttribute('location', () => databases.createStringAttribute(DB_ID, COLL_ID, 'location', 255, false));
-    
-    // Cost: e.g. '€€'
-    await ensureAttribute('cost', () => databases.createStringAttribute(DB_ID, COLL_ID, 'cost', 20, false));
-    
-    // Duration: e.g. '2 Stunden'
-    await ensureAttribute('duration', () => databases.createStringAttribute(DB_ID, COLL_ID, 'duration', 100, false));
+    // Features
+    await ensureAttribute(COLL_ID, 'type', () => databases.createStringAttribute(DB_ID, COLL_ID, 'type', 50, false, 'Aktivitäten'));
+    await ensureAttribute(COLL_ID, 'order', () => databases.createFloatAttribute(DB_ID, COLL_ID, 'order', false)); 
+    await ensureAttribute(COLL_ID, 'plannedMonth', () => databases.createStringAttribute(DB_ID, COLL_ID, 'plannedMonth', 10, false));
 
-    // CreatedBy: Store user name/email
-    await ensureAttribute('createdBy', () => databases.createStringAttribute(DB_ID, COLL_ID, 'createdBy', 255, false));
-
+    // --- Attributes for META (Collections) ---
+    console.log("--- Setting up Meta Attributes ---");
+    await ensureAttribute(META_COLL_ID, 'name', () => databases.createStringAttribute(DB_ID, META_COLL_ID, 'name', 50, true));
 
     console.log('🎉 Initialization Complete! Schema is ready.');
 }
