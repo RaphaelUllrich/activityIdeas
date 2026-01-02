@@ -20,8 +20,8 @@ export interface CollectionMeta {
     name: string;
 }
 
-// Map Appwrite document to our DateIdea type
-const mapDoc = (doc: any): DateIdea => ({
+// Helper public machen, damit wir Realtime-Daten formatieren können
+export const mapDoc = (doc: any): DateIdea => ({
     id: doc.$id,
     title: doc.title,
     category: doc.category || 'Sonstiges',
@@ -59,7 +59,6 @@ export const appwriteService = {
     },
 
     async addIdea(idea: any): Promise<DateIdea> {
-        // Prepare payload, ensuring clean object
         const payload = {
             title: idea.title,
             completed: idea.completed,
@@ -95,55 +94,51 @@ export const appwriteService = {
         await databases.deleteDocument(DB_ID, COLL_ID, id);
     },
 
-    // --- COLLECTION MANAGEMENT (Shared DB) ---
-
-    // 1. List all Collections
+    // --- COLLECTION MANAGEMENT ---
     async listCollections(): Promise<CollectionMeta[]> {
         try {
             const res = await databases.listDocuments(DB_ID, META_COLL_ID);
             return res.documents.map(d => ({ $id: d.$id, name: d.name }));
         } catch (e) {
-            console.error("Failed to load collections", e);
             return [];
         }
     },
 
-    // 2. Create Collection
     async createCollection(name: string): Promise<CollectionMeta> {
         const res = await databases.createDocument(DB_ID, META_COLL_ID, ID.unique(), { name });
         return { $id: res.$id, name: res.name };
     },
 
-    // 3. Delete Collection (Deep Delete)
     async deleteCollection(id: string, name: string): Promise<void> {
-        // A. Find all items in this collection
         const ideas = await databases.listDocuments(DB_ID, COLL_ID, [
             Query.equal('type', name),
             Query.limit(100)
         ]);
-
-        // B. Delete items
         const deletePromises = ideas.documents.map(doc => 
             databases.deleteDocument(DB_ID, COLL_ID, doc.$id)
         );
         await Promise.all(deletePromises);
-
-        // C. Delete collection meta
         await databases.deleteDocument(DB_ID, META_COLL_ID, id);
     },
 
-    // 4. Rename Collection
     async renameCollection(id: string, oldName: string, newName: string): Promise<void> {
          await databases.updateDocument(DB_ID, META_COLL_ID, id, { name: newName });
-
          const ideas = await databases.listDocuments(DB_ID, COLL_ID, [
             Query.equal('type', oldName),
             Query.limit(100)
         ]);
-
         const updatePromises = ideas.documents.map(doc => 
             databases.updateDocument(DB_ID, COLL_ID, doc.$id, { type: newName })
         );
         await Promise.all(updatePromises);
+    },
+
+    // --- REALTIME SUBSCRIPTION (NEU) ---
+    subscribe(callback: (response: any) => void) {
+        // Wir abonnieren beide Channels: Ideen und Sammlungen
+        return client.subscribe([
+            `databases.${DB_ID}.collections.${COLL_ID}.documents`,
+            `databases.${DB_ID}.collections.${META_COLL_ID}.documents`
+        ], callback);
     }
 };

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Plus, Trash2, Check, Sparkles, Heart, X, Loader2, WifiOff, LogOut, Menu, Calendar, List as ListIcon, GripVertical, Pencil, Dices, Coins, Clock, MapPin, Banknote } from 'lucide-react';
+import { Plus, Trash2, Check, Sparkles, Heart, X, Loader2, WifiOff, LogOut, Menu, Calendar, List as ListIcon, GripVertical, Pencil, Dices, Coins, Clock, MapPin } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { format, addMonths, startOfMonth } from 'date-fns';
@@ -7,7 +7,8 @@ import { de } from 'date-fns/locale';
 
 import { DateIdea, CostLevel } from './types';
 import { generateDateIdeas } from './services/geminiService';
-import { appwriteService, CollectionMeta } from './services/appwrite';
+// WICHTIG: Hier importieren wir jetzt auch 'mapDoc' für die Live-Updates
+import { appwriteService, CollectionMeta, mapDoc } from './services/appwrite';
 import LoginScreen from './components/LoginScreen';
 
 // Constants
@@ -29,7 +30,7 @@ const App: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [viewMode, setViewMode] = useState<'list' | 'planner'>('list');
   
-  // COLLECTION STATE (New: Object Array from DB)
+  // COLLECTION STATE
   const [collections, setCollections] = useState<CollectionMeta[]>([]);
   const [activeCollection, setActiveCollection] = useState<string>('Aktivitäten');
   
@@ -63,7 +64,7 @@ const App: React.FC = () => {
   const [costFilter, setCostFilter] = useState<CostLevel | 'all'>('all');
   const [durationFilter, setDurationFilter] = useState<string | 'all'>('all');
 
-  // Persistence helpers (Fallback only)
+  // Persistence helpers
   const saveLocal = (items: DateIdea[]) => localStorage.setItem('datejar_ideas', JSON.stringify(items));
   const getLocal = (): DateIdea[] => {
     const s = localStorage.getItem('datejar_ideas');
@@ -86,13 +87,54 @@ const App: React.FC = () => {
     init();
   }, []);
 
+  // --- REALTIME UPDATES (Das ist neu!) ---
+  useEffect(() => {
+    if (!user) return; 
+
+    console.log("🔌 Starte Realtime-Verbindung...");
+
+    const unsubscribe = appwriteService.subscribe((response) => {
+        // Logge ALLES, was vom Server kommt
+        console.log("⚡ Realtime Event empfangen:", response);
+
+        const eventType = response.events[0]; 
+        const payload = response.payload;
+
+        // Prüfen, ob es ein IDEEN-Update ist
+        if (response.events.some((e: string) => e.includes('ideas'))) {
+            console.log("🎯 Es ist ein Update für 'ideas'!");
+            const mappedItem = mapDoc(payload);
+
+            if (eventType.includes('.create')) {
+                setIdeas(prev => [mappedItem, ...prev]);
+            } else if (eventType.includes('.update')) {
+                setIdeas(prev => prev.map(i => i.id === payload.$id ? mappedItem : i));
+            } else if (eventType.includes('.delete')) {
+                setIdeas(prev => prev.filter(i => i.id !== payload.$id));
+            }
+        }
+        
+        // Prüfen, ob es ein SAMMLUNGS-Update ist
+        else if (response.events.some((e: string) => e.includes('collections_meta'))) {
+             console.log("📚 Es ist ein Update für 'collections'!");
+             appwriteService.listCollections().then(setCollections);
+        } 
+        
+        else {
+            console.warn("⚠️ Event passte zu keinem Filter:", response.events);
+        }
+    });
+
+    return () => {
+        console.log("🔌 Trenne Verbindung.");
+        unsubscribe();
+    };
+  }, [user]);
+
   const loadData = async () => {
     setLoading(true);
     try {
-      // 1. Load Collections
       let cols = await appwriteService.listCollections();
-      
-      // If empty (first run), create defaults
       if (cols.length === 0) {
           for (const name of DEFAULT_COLLECTIONS) {
               await appwriteService.createCollection(name);
@@ -101,15 +143,12 @@ const App: React.FC = () => {
       }
       setCollections(cols);
 
-      // Set active
       if (cols.length > 0) {
-           // If current active not in list, fallback to first
            if (!cols.find(c => c.name === activeCollection)) {
                setActiveCollection(cols[0].name);
            }
       }
 
-      // 2. Load Ideas
       const fetchedIdeas = await appwriteService.listIdeas();
       setIdeas(fetchedIdeas);
       setOfflineMode(false);
@@ -117,7 +156,6 @@ const App: React.FC = () => {
       console.warn("Offline", error);
       setOfflineMode(true);
       setIdeas(getLocal());
-      // Fallback collections for offline
       setCollections(DEFAULT_COLLECTIONS.map((n, i) => ({ $id: `local-${i}`, name: n })));
     } finally {
       setLoading(false);
@@ -131,16 +169,16 @@ const App: React.FC = () => {
       await appwriteService.logout();
       setUser(null);
       setIdeas([]);
-      window.location.reload(); // Hard reload to clear states
+      window.location.reload(); 
   };
 
   // --- Collection Management ---
   const handleAddCollection = async () => {
       const name = prompt("Name der neuen Sammlung (z.B. 'Filme'):");
       if (!name) return;
-      
       try {
           const newCol = await appwriteService.createCollection(name);
+          // Frontend Optimistic Update (wird durch Realtime bestätigt)
           setCollections([...collections, newCol]);
           setActiveCollection(newCol.name);
           setSidebarOpen(false);
@@ -150,14 +188,12 @@ const App: React.FC = () => {
   const handleDeleteCollection = async (id: string, name: string, e: React.MouseEvent) => {
       e.stopPropagation();
       if (!window.confirm(`Warnung: Sammlung "${name}" und ALLE Einträge darin werden gelöscht!`)) return;
-
       try {
           await appwriteService.deleteCollection(id, name);
+          // Frontend Optimistic Update
           const newCols = collections.filter(c => c.$id !== id);
           setCollections(newCols);
-          // Cleanup ideas in frontend
           setIdeas(prev => prev.filter(i => i.type !== name));
-          
           if (activeCollection === name && newCols.length > 0) {
               setActiveCollection(newCols[0].name);
           }
@@ -168,7 +204,6 @@ const App: React.FC = () => {
       e.stopPropagation();
       const newName = prompt("Neuer Name:", oldName);
       if (!newName || newName === oldName) return;
-
       try {
           await appwriteService.renameCollection(id, oldName, newName);
           setCollections(prev => prev.map(c => c.$id === id ? { ...c, name: newName } : c));
@@ -229,6 +264,7 @@ const App: React.FC = () => {
 
     if (editingItem) {
         // UPDATE
+        // Optimistic UI Update (sofort anzeigen)
         const updatedItem = { ...editingItem, ...commonPayload };
         setIdeas(prev => prev.map(i => i.id === editingItem.id ? updatedItem : i));
         setShowModal(false);
@@ -256,15 +292,20 @@ const App: React.FC = () => {
             type: activeCollection
         };
 
+        // Optimistic UI
         const newIdeas = [newItem, ...ideas];
         setIdeas(newIdeas);
         setShowModal(false);
 
         if (!offlineMode) {
             try {
-                const saved = await appwriteService.addIdea(newItem);
-                setIdeas(prev => prev.map(i => i.id === tempId ? saved : i));
-            } catch (e) { console.error(e); setOfflineMode(true); saveLocal(newIdeas); }
+                // Wir warten nicht auf das Ergebnis für die UI, da Realtime das gleich regelt
+                await appwriteService.addIdea(newItem);
+            } catch (e) { 
+                console.error(e); 
+                setOfflineMode(true); 
+                saveLocal(newIdeas); 
+            }
         } else {
             saveLocal(newIdeas);
         }
@@ -274,8 +315,11 @@ const App: React.FC = () => {
   const deleteItem = async (id: string, e?: React.MouseEvent) => {
     if(e) e.stopPropagation();
     if (!window.confirm('Wirklich löschen?')) return;
+    
+    // Optimistic Delete
     const newIdeas = ideas.filter(item => item.id !== id);
     setIdeas(newIdeas);
+
     if (!offlineMode) {
       try { await appwriteService.deleteIdea(id); } catch (e) { setOfflineMode(true); }
     }
@@ -288,6 +332,8 @@ const App: React.FC = () => {
     if (!item) return;
 
     const isCompleting = !item.completed;
+    
+    // Optimistic Update
     const newIdeas = ideas.map(i => i.id === id ? { ...i, completed: isCompleting } : i);
     setIdeas(newIdeas);
     
@@ -299,28 +345,17 @@ const App: React.FC = () => {
     saveLocal(newIdeas);
   };
 
-  // --- Shuffle Logic ---
   const handleShuffle = () => {
     const pool = currentCollectionIdeas.filter(i => !i.completed);
-    
     if (pool.length === 0) {
         alert("Keine offenen Ideen in dieser Sammlung vorhanden!");
         return;
     }
-
     const randomItem = pool[Math.floor(Math.random() * pool.length)];
     setPickedIdea(randomItem);
     setShowShuffleModal(true);
-
-    confetti({
-        particleCount: 150,
-        spread: 100,
-        origin: { y: 0.7 },
-        colors: ['#FFD700', '#f43f5e', '#4F46E5']
-    });
+    confetti({ particleCount: 150, spread: 100, origin: { y: 0.7 }, colors: ['#FFD700', '#f43f5e', '#4F46E5'] });
   };
-
-  // --- Drag & Drop Reordering ---
 
   const onDragEnd = async (result: DropResult) => {
       if (!result.destination) return;
@@ -335,49 +370,41 @@ const App: React.FC = () => {
 
       const updatedIdeas = ideas.map(idea => {
           const newIndex = reorderedList.findIndex(i => i.id === idea.id);
-          if (newIndex !== -1) {
-              return { ...idea, order: newIndex };
-          }
+          if (newIndex !== -1) return { ...idea, order: newIndex };
           return idea;
       });
 
       setIdeas(updatedIdeas);
 
       if (!offlineMode) {
-          try {
-             await appwriteService.updateIdea(movedItem.id, { order: destIndex });
-          } catch(e) { console.error(e); }
+          try { await appwriteService.updateIdea(movedItem.id, { order: destIndex }); } catch(e) { console.error(e); }
       }
   };
-
-  // --- Planner Logic ---
 
   const getMonths = () => {
       const today = startOfMonth(new Date());
       return Array.from({ length: 12 }, (_, i) => addMonths(today, i));
   };
 
-  // --- AI ---
   const handleAiGenerate = async () => {
     setIsAiLoading(true);
     try {
       const titles = ideas.filter(i => i.type === activeCollection).map(i => i.title);
       const suggestions = await generateDateIdeas(titles);
-       const newItems = suggestions.map((s, idx) => ({
-          ...s,
-          id: 'temp-' + crypto.randomUUID(),
-          createdBy: 'Gemini AI',
-          completed: false,
-          createdAt: Date.now() + idx,
-          type: activeCollection,
-          order: -1
-      }));
-      setIdeas(prev => [...newItems, ...prev]);
-      setShowModal(false);
-      
+      // Wir fügen sie nicht manuell in den State ein, 
+      // sondern senden sie an Appwrite -> Realtime fügt sie dann ein!
       if(!offlineMode) {
-         suggestions.forEach(s => appwriteService.addIdea({...s, createdBy: 'Gemini AI', completed: false, createdAt: Date.now(), type: activeCollection, order: 0}));
+         const promises = suggestions.map((s, idx) => appwriteService.addIdea({
+             ...s, 
+             createdBy: 'Gemini AI', 
+             completed: false, 
+             createdAt: Date.now() + idx, 
+             type: activeCollection, 
+             order: 0
+         }));
+         await Promise.all(promises);
       }
+      setShowModal(false);
     } catch (e) { alert('Fehler bei AI Generierung'); } finally { setIsAiLoading(false); }
   };
 
@@ -399,12 +426,10 @@ const App: React.FC = () => {
 
   const filteredIdeas = currentCollectionIdeas.filter(item => {
     if (viewMode === 'planner') return true; 
-    
     const statusMatch = statusFilter === 'all' ? true : statusFilter === 'active' ? !item.completed : item.completed;
     const catMatch = categoryFilter === 'all' ? true : item.category === categoryFilter;
     const costMatch = costFilter === 'all' ? true : item.cost === costFilter;
     const durMatch = durationFilter === 'all' ? true : item.duration === durationFilter;
-
     return statusMatch && catMatch && costMatch && durMatch;
   }).sort((a, b) => (a.order || 0) - (b.order || 0));
 
@@ -442,7 +467,6 @@ const App: React.FC = () => {
                         onClick={() => { setActiveCollection(col.name); setSidebarOpen(false); }}
                     >
                         <span>{col.name}</span>
-                        
                         <div className="flex items-center gap-1">
                             {activeCollection === col.name && <Check className="w-4 h-4 mr-2" />}
                             <button onClick={(e) => handleRenameCollection(col.$id, col.name, e)} className="p-1 text-gray-400 hover:text-blue-500 hover:bg-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
