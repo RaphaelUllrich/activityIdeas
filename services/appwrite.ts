@@ -1,4 +1,4 @@
-import { Client, Databases, Account, ID, Query } from 'appwrite';
+import { Client, Databases, Account, ID, Query, Storage } from 'appwrite';
 import { DateIdea } from '../types';
 
 const PROJECT_ID = '69505859000f4ab4347d';
@@ -7,6 +7,7 @@ const ENDPOINT = 'https://cloud.appwrite.io/v1';
 const DB_ID = 'datejar_db';
 const COLL_ID = 'ideas';
 const META_COLL_ID = 'collections_meta';
+const BUCKET_ID = 'images';
 
 const client = new Client()
     .setEndpoint(ENDPOINT)
@@ -14,34 +15,61 @@ const client = new Client()
 
 const databases = new Databases(client);
 const account = new Account(client);
+const storage = new Storage(client);
 
 export interface CollectionMeta {
     $id: string;
     name: string;
 }
 
-// Helper public machen, damit wir Realtime-Daten formatieren können
-export const mapDoc = (doc: any): DateIdea => ({
-    id: doc.$id,
-    title: doc.title,
-    category: doc.category || 'Sonstiges',
-    description: doc.description || '',
-    location: doc.location || '',
-    duration: doc.duration || '',
-    cost: doc.cost || 'Kostenlos',
-    createdBy: doc.createdBy || '',
-    completed: doc.completed,
-    createdAt: doc.createdAt,
-    type: doc.type || 'Aktivitäten',
-    order: doc.order || 0,
-    plannedMonth: doc.plannedMonth || undefined,
-});
+// UPDATE: Robusteres Mapping
+export const mapDoc = (doc: any): DateIdea => {
+    // Debugging: Falls das Feld fehlt, sehen wir es in der Konsole
+    // if (doc.isFavorite === undefined) console.warn("Dokument hat kein isFavorite Feld:", doc);
+    
+    return {
+        id: doc.$id,
+        title: doc.title,
+        category: doc.category || 'Sonstiges',
+        description: doc.description || '',
+        location: doc.location || '',
+        duration: doc.duration || '',
+        cost: doc.cost || 'Kostenlos',
+        createdBy: doc.createdBy || '',
+        completed: !!doc.completed, // Erzwinge Boolean
+        isFavorite: !!doc.isFavorite, // UPDATE: Erzwinge Boolean (null -> false)
+        createdAt: doc.createdAt,
+        type: doc.type || 'Aktivitäten',
+        order: doc.order || 0,
+        plannedMonth: doc.plannedMonth || undefined,
+        imageId: doc.imageId || null,
+    };
+};
 
 export const appwriteService = {
     // Auth Methods
     async login(email, password) { return await account.createEmailPasswordSession(email, password); },
     async logout() { try { await account.deleteSession('current'); } catch {} },
     async getUser() { try { return await account.get(); } catch { return null; } },
+
+    // --- STORAGE METHODS ---
+    async uploadImage(file: File) {
+        try {
+            const response = await storage.createFile(BUCKET_ID, ID.unique(), file);
+            return response.$id;
+        } catch (error) {
+            console.error("Image upload failed:", error);
+            throw error;
+        }
+    },
+
+    getImageView(fileId: string) {
+        return storage.getFileView(BUCKET_ID, fileId);
+    },
+
+    getImageDownload(fileId: string) {
+        return storage.getFileDownload(BUCKET_ID, fileId);
+    },
 
     // --- IDEA METHODS ---
     async listIdeas(): Promise<DateIdea[]> {
@@ -62,6 +90,7 @@ export const appwriteService = {
         const payload = {
             title: idea.title,
             completed: idea.completed,
+            isFavorite: !!idea.isFavorite, // Boolean erzwingen
             createdAt: idea.createdAt,
             category: idea.category,
             description: idea.description,
@@ -71,7 +100,8 @@ export const appwriteService = {
             createdBy: idea.createdBy,
             type: idea.type,
             order: idea.order,
-            plannedMonth: idea.plannedMonth
+            plannedMonth: idea.plannedMonth,
+            imageId: idea.imageId
         };
         const response = await databases.createDocument(DB_ID, COLL_ID, ID.unique(), payload);
         return mapDoc(response);
@@ -79,12 +109,20 @@ export const appwriteService = {
 
     async updateIdea(id: string, data: any): Promise<DateIdea> {
         const payload: any = {};
-        const keys = ['title', 'completed', 'category', 'description', 'location', 'cost', 'duration', 'createdBy', 'type', 'order', 'plannedMonth'];
+        const keys = [
+            'title', 'completed', 'isFavorite', 'category', 'description', 
+            'location', 'cost', 'duration', 'createdBy', 
+            'type', 'order', 'plannedMonth', 'imageId'
+        ];
         
         keys.forEach(key => {
             if (data[key] !== undefined) payload[key] = data[key];
         });
+        
         if (data.plannedMonth === null) payload.plannedMonth = null;
+        if (data.imageId === null) payload.imageId = null;
+
+        // console.log("Sende Update an Appwrite:", payload); // Debugging Log
 
         const response = await databases.updateDocument(DB_ID, COLL_ID, id, payload);
         return mapDoc(response);
@@ -133,9 +171,8 @@ export const appwriteService = {
         await Promise.all(updatePromises);
     },
 
-    // --- REALTIME SUBSCRIPTION (NEU) ---
+    // --- REALTIME SUBSCRIPTION ---
     subscribe(callback: (response: any) => void) {
-        // Wir abonnieren beide Channels: Ideen und Sammlungen
         return client.subscribe([
             `databases.${DB_ID}.collections.${COLL_ID}.documents`,
             `databases.${DB_ID}.collections.${META_COLL_ID}.documents`

@@ -11,11 +11,12 @@ export interface DateIdea {
   cost?: CostLevel;
   createdBy?: string; 
   completed: boolean;
+  isFavorite?: boolean; // NEU: Favoriten-Status
   createdAt: number;
-  // New Fields
-  type: string; // e.g., "Aktivitäten", "Gerichte", "Ideen"
-  order: number; // For manual sorting
-  plannedMonth?: string; // Format "YYYY-MM"
+  type: string; 
+  order: number; 
+  plannedMonth?: string; 
+  imageId?: string | null; 
 }
 
 export interface AIPromptRequest {

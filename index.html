@@ -9,7 +9,6 @@
     <meta name="theme-color" content="#f43f5e" />
     <meta name="mobile-web-app-capable" content="yes" /> 
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="DateJar" />
     
     <link rel="icon" type="image/png" href="/icon-192.png" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
@@ -17,12 +16,14 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
+        darkMode: 'class',
         theme: {
           extend: {
             colors: {
-              primary: '#f43f5e', // Rose 500
-              secondary: '#fda4af', // Rose 300
-              background: '#fff1f2', // Rose 50
+              // Tailwind nutzt diese Variablen. <alpha-value> ist wichtig für Transparenz.
+              primary: 'rgb(var(--color-primary) / <alpha-value>)', 
+              secondary: 'rgb(var(--color-secondary) / <alpha-value>)',
+              background: '#fff1f2', 
             },
             fontFamily: {
               sans: ['Inter', 'sans-serif'],
@@ -32,18 +33,25 @@
       }
     </script>
     <style>
+      :root {
+        /* Standard: Rose */
+        --color-primary: 244 63 94;   
+        --color-secondary: 253 164 175;
+      }
+      
       body {
         -webkit-tap-highlight-color: transparent;
         font-family: 'Inter', sans-serif;
-        background-color: #fff1f2;
       }
+      /* Smooth transition für Dark Mode und Farbwechsel */
+      html, body { transition: background-color 0.3s, color 0.3s; }
+      
       .no-scrollbar::-webkit-scrollbar { display: none; }
       .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
     </style>
   </head>
-  <body>
+  <body class="bg-rose-50 dark:bg-slate-950 transition-colors duration-300">
     <div id="root"></div>
-
     <script type="module" src="/index.tsx"></script>
   </body>
 </html>

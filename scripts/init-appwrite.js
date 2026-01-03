@@ -1,4 +1,4 @@
-import { Client, Databases, Permission, Role } from 'node-appwrite';
+import { Client, Databases, Permission, Role, Storage } from 'node-appwrite';
 
 // Configuration
 const ENDPOINT = 'https://cloud.appwrite.io/v1'; 
@@ -8,7 +8,8 @@ const API_KEY = 'standard_2cfbd2f45b0198e7b0ee5367e0bd8b72719d228fed58e0a403f53e
 
 const DB_ID = 'datejar_db';
 const COLL_ID = 'ideas';
-const META_COLL_ID = 'collections_meta'; // NEU: Für Sammlungs-Namen
+const META_COLL_ID = 'collections_meta';
+const BUCKET_ID = 'images';
 
 const client = new Client()
     .setEndpoint(ENDPOINT)
@@ -16,7 +17,9 @@ const client = new Client()
     .setKey(API_KEY);
 
 const databases = new Databases(client);
+const storage = new Storage(client);
 
+// Helper: Wartet, bis ein Attribut fertig erstellt ist (Status 'available')
 async function waitForAttribute(dbId, collId, key) {
     let retries = 0;
     while (retries < 30) {
@@ -50,13 +53,26 @@ async function init() {
         } else throw e;
     }
 
-    // 2. Permissions (Public Read/Write for simplicity in this demo)
+    // Permissions (Public Read/Write for simplicity)
     const permissions = [
         Permission.read(Role.any()),
         Permission.write(Role.any()),
         Permission.update(Role.any()),
         Permission.delete(Role.any()),
     ];
+
+    // 2. Storage Bucket
+    try {
+        await storage.getBucket(BUCKET_ID);
+        console.log('✅ Storage Bucket exists');
+    } catch (e) {
+        if (e.code === 404) {
+            console.log('Creating Storage Bucket...');
+            // File Security true, aber Permissions public
+            await storage.createBucket(BUCKET_ID, 'Images', permissions, true);
+            console.log('✅ Storage Bucket created');
+        } else throw e;
+    }
 
     // 3. Collection: IDEAS
     try {
@@ -83,29 +99,30 @@ async function init() {
         } else throw e;
     }
 
-    // 5. Create Attributes helper
+    // 5. Attributes Helper
     const ensureAttribute = async (collId, key, createPromise) => {
         try {
-            const attrs = await databases.listAttributes(DB_ID, collId);
-            const exists = attrs.attributes.find(a => a.key === key);
-            if (!exists) {
-                console.log(`Creating attribute in ${collId}: ${key}...`);
-                await createPromise();
-            } else {
-                console.log(`✅ Attribute '${key}' in ${collId} exists`);
-            }
-            await waitForAttribute(DB_ID, collId, key);
+            await createPromise();
+            console.log(`Creating attribute in ${collId}: ${key}...`);
         } catch (e) {
-            console.error(`Error handling attribute ${key}:`, e);
+            // Error 409 bedeutet, das Attribut existiert schon. Das ist gut.
+            if (e.code !== 409) {
+                console.error(`Error creating attribute ${key}:`, e.message);
+            }
         }
+        await waitForAttribute(DB_ID, collId, key);
     };
 
-    // --- Attributes for IDEAS ---
     console.log("--- Setting up Idea Attributes ---");
+    
+    // Core Data
     await ensureAttribute(COLL_ID, 'title', () => databases.createStringAttribute(DB_ID, COLL_ID, 'title', 255, true));
     await ensureAttribute(COLL_ID, 'completed', () => databases.createBooleanAttribute(DB_ID, COLL_ID, 'completed', true));
     await ensureAttribute(COLL_ID, 'createdAt', () => databases.createIntegerAttribute(DB_ID, COLL_ID, 'createdAt', true));
     
+    // NEU: Favoriten Status
+    await ensureAttribute(COLL_ID, 'isFavorite', () => databases.createBooleanAttribute(DB_ID, COLL_ID, 'isFavorite', false, false));
+
     // Metadata
     await ensureAttribute(COLL_ID, 'category', () => databases.createStringAttribute(DB_ID, COLL_ID, 'category', 50, false, 'Sonstiges'));
     await ensureAttribute(COLL_ID, 'description', () => databases.createStringAttribute(DB_ID, COLL_ID, 'description', 2000, false));
@@ -114,10 +131,13 @@ async function init() {
     await ensureAttribute(COLL_ID, 'duration', () => databases.createStringAttribute(DB_ID, COLL_ID, 'duration', 100, false));
     await ensureAttribute(COLL_ID, 'createdBy', () => databases.createStringAttribute(DB_ID, COLL_ID, 'createdBy', 255, false));
 
-    // Features
+    // Features / Sorting
     await ensureAttribute(COLL_ID, 'type', () => databases.createStringAttribute(DB_ID, COLL_ID, 'type', 50, false, 'Aktivitäten'));
     await ensureAttribute(COLL_ID, 'order', () => databases.createFloatAttribute(DB_ID, COLL_ID, 'order', false)); 
     await ensureAttribute(COLL_ID, 'plannedMonth', () => databases.createStringAttribute(DB_ID, COLL_ID, 'plannedMonth', 10, false));
+    
+    // Images
+    await ensureAttribute(COLL_ID, 'imageId', () => databases.createStringAttribute(DB_ID, COLL_ID, 'imageId', 255, false));
 
     // --- Attributes for META (Collections) ---
     console.log("--- Setting up Meta Attributes ---");
